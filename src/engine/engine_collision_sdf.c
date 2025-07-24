@@ -522,9 +522,9 @@ static int isknown(const mjtNum* points, const mjtNum x[3], int cnt) {
 // adds candidate point to result
 static int addContact(mjtNum* points, mjContact* con, const mjtNum x[3],
                       const mjtNum pos2[3], const mjtNum quat2[4], mjtNum dist,
-                      int cnt, const mjModel* m, const mjSDF* s, mjData* d) {
+                      int cnt, const mjModel* m, const mjSDF* s, mjData* d, mjtNum margin) {
   // check if there is a collision
-  if (dist > 0 || isknown(points, x, cnt)) {
+  if (dist > margin || isknown(points, x, cnt)) {
     return cnt;
   } else {
     mju_copy3(points+3*cnt, x);
@@ -533,7 +533,10 @@ static int addContact(mjtNum* points, mjContact* con, const mjtNum x[3],
   // compute normal in local coordinates
   mjtNum norm[3], vec[3];
   mjc_gradient(m, d, s, norm, x);
+  // invert normal if penetrating
+  if (dist < 0) {
   mju_scl3(norm, norm, -1);
+  }
 
   // construct contact
   con[cnt].dist = dist;
@@ -630,7 +633,7 @@ static mjtNum stepGradient(mjtNum x[3], const mjModel* m, const mjSDF* s,
 
 // stricter triangle collision
 static int triangleIntersect(const mjtNum triangle[9], const mjModel* m,
-                             const mjSDF* sdf, mjData* d) {
+                             const mjSDF* sdf, mjData* d, mjtNum margin) {
   mjtNum edges[6];
   mjtNum normal[3], center[3];
   mjtNum v[9], cross[9], p[3];
@@ -667,13 +670,13 @@ static int triangleIntersect(const mjtNum triangle[9], const mjModel* m,
   // coordinate change
   mju_addTo3(center, p);
 
-  return mjc_distance(m, d, sdf, center) < r;
+  return mjc_distance(m, d, sdf, center) < r + margin;
 }
 
 // intersect with circumsphere of bounding box
 static int boxIntersect(const mjtNum bvh[6], const mjtNum offset[3],
                         const mjtNum rotation[9], const mjModel* m,
-                        const mjSDF* s, mjData* d) {
+                        const mjSDF* s, mjData* d, mjtNum margin) {
   mjtNum candidate[3];
   mjtNum r = mju_norm3(bvh+3);
 
@@ -681,7 +684,7 @@ static int boxIntersect(const mjtNum bvh[6], const mjtNum offset[3],
   mju_addTo3(candidate, offset);
 
   // check if inside the bounding box
-  return mjc_distance(m, d, s, candidate) < r;
+  return mjc_distance(m, d, s, candidate) < r + margin;
 }
 
 //---------------------------- mesh vs sdf broad phase --------------------------------------------
@@ -690,7 +693,7 @@ static int boxIntersect(const mjtNum bvh[6], const mjtNum offset[3],
 static void collideBVH(const mjModel* m, mjData* d, int g,
                        const mjtNum offset[3], const mjtNum rotation[9],
                        int* faces, int* npoints, int* n0,
-                       const mjSDF* sdf) {
+                       const mjSDF* sdf, mjtNum margin) {
   const int bvhadr = m->mesh_bvhadr[m->geom_dataid[g]];
   const int* faceid = m->bvh_nodeid + bvhadr;
   const mjtNum* bvh = m->bvh_aabb + 6*bvhadr;
@@ -718,7 +721,7 @@ static void collideBVH(const mjModel* m, mjData* d, int g,
 
     // node1 is a leaf
     if (faceid[node] != -1) {
-      if (boxIntersect(bvh+6*node, offset, rotation, m, sdf, d)) {
+      if (boxIntersect(bvh+6*node, offset, rotation, m, sdf, d, margin)) {
         faces[*npoints] = faceid[node];
         if (++(*npoints) == MAXSDFFACE) {
           mju_warning("mjc_MeshSDF: too many bounding volumes, some contacts may be missed");
@@ -731,7 +734,7 @@ static void collideBVH(const mjModel* m, mjData* d, int g,
     }
 
     // if no intersection at intermediate levels, stop
-    if (!boxIntersect(bvh+6*node, offset, rotation, m, sdf, d)) {
+    if (!boxIntersect(bvh+6*node, offset, rotation, m, sdf, d, margin)) {
       continue;
     }
 
@@ -788,7 +791,7 @@ int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g
   mapPose(pos1, quat1, pos2, sdf_quat, offset, rotation);
 
   // binary tree search
-  collideBVH(m, (mjData*)d, g1, offset, rotation, faces, &npoints, &n0, &sdf);
+  collideBVH(m, (mjData*)d, g1, offset, rotation, faces, &npoints, &n0, &sdf, margin);
 
   // Frank-Wolfe algorithm
   for (int i=0; i < npoints; i++) {
@@ -806,7 +809,7 @@ int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g
     }
 
     // stricter culling
-    if (!triangleIntersect(corners, m, &sdf, (mjData*)d)) {
+    if (!triangleIntersect(corners, m, &sdf, (mjData*)d, margin)) {
       continue;
     }
 
@@ -816,16 +819,36 @@ int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g
     x[2] = (corners[2]+corners[5]+corners[8])/3;
 
     // SHOULD NOT OCCUR
-    if (ncandidate == MAXMESHPNT)mjERROR("too many contact points");
+    // if (ncandidate == MAXMESHPNT)mjERROR("too many contact points");
 
     // Frank-Wolfe
     depth = stepFrankWolfe(x, corners, 3, m, &sdf, (mjData*)d);
 
     // store candidate if there is penetration
-    if (depth < 0) {
+    if (depth < margin) {
+      if (ncandidate < MAXMESHPNT) {
+        // Still have room, add normally
       mju_copy3(candidate + 3*ncandidate, x);
       index[ncandidate] = ncandidate;
       dist[ncandidate++] = depth;
+      } else {
+        // Find the least penetrating contact
+        int worst_idx = 0;
+        mjtNum worst_dist = dist[0];
+        for (int j = 1; j < MAXMESHPNT; j++) {
+            if (dist[j] > worst_dist) {
+                worst_dist = dist[j];
+                worst_idx = j;
+            }
+        }
+
+        // Replace it if this new contact is better
+        if (depth < worst_dist) {
+            mju_copy3(candidate + 3*worst_idx, x);
+            index[worst_idx] = worst_idx;
+            dist[worst_idx] = depth;
+        }
+      }
     }
   }
 
@@ -838,7 +861,7 @@ int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g
   // add only the first mjMAXCONPAIR pairs
   for (int i=0; i < mju_min(ncandidate, mjMAXCONPAIR); i++) {
     cnt = addContact(points, con, candidate + 3*index[i], pos2, sdf_quat,
-                     dist[index[i]], cnt, m, &sdf, (mjData*)d);
+                     dist[index[i]], cnt, m, &sdf, (mjData*)d, margin);
   }
 
   return cnt;
@@ -899,7 +922,7 @@ int mjc_SDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g2, m
   }
 
   // no intersection if max < min
-  if (aabb[3] < aabb[0] || aabb[4] < aabb[1] || aabb[5] < aabb[2]) {
+  if (aabb[3] + margin < aabb[0] || aabb[4] + margin < aabb[1] || aabb[5] + margin < aabb[2]) {
     return cnt;
   }
 
@@ -971,7 +994,7 @@ int mjc_SDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g2, m
 
     // contact point and normal - we use the midsurface where SDF1=SDF2 as zero level set
     sdf.type = mjSDFTYPE_MIDSURFACE;
-    cnt = addContact(contacts, con, x, pos2, quat2, dist, cnt, m, &sdf, (mjData*)d);
+    cnt = addContact(contacts, con, x, pos2, quat2, dist, cnt, m, &sdf, (mjData*)d, margin);
 
     // SHOULD NOT OCCUR
     if (cnt > mjMAXCONPAIR) {
