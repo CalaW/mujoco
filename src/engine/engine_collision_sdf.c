@@ -537,9 +537,9 @@ static int addContact(mjtNum* points, mjContact* con, const mjtNum x[3],
   mjtNum norm[3], vec[3];
   mjc_gradient(m, d, s, norm, x);
   // invert normal if penetrating
-  if (dist < 0) {
-  mju_scl3(norm, norm, -1);
-  }
+  // if (dist < 0) {
+  //   mju_scl3(norm, norm, -1);
+  // }
 
   // construct contact
   con[cnt].dist = dist;
@@ -766,6 +766,12 @@ int mjc_HFieldSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int
 
 // collision between a mesh and a signed distance field
 int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g2, mjtNum margin) {
+  // ensure mesh is always the first geom
+  if (m->geom_type[g1] == mjGEOM_CYLINDER) {
+    int temp = g1;
+    g1 = g2;
+    g2 = temp;
+  }
   mjGETINFO;
 
   mjtNum offset[3], rotation[9], corners[9], x[3], depth;
@@ -776,9 +782,16 @@ int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g
 
   // get sdf plugin
   int instance = m->geom_plugin[g2];
-  const mjpPlugin* sdf_ptr = instance == -1 ? NULL : mjc_getSDF(m, g2);
-  instance = instance == -1 ? m->geom_dataid[g2] : instance;
-  mjtGeom geomtype = mjGEOM_SDF;
+  const mjpPlugin* sdf_ptr = NULL;
+  mjtGeom geomtype = m->geom_type[g2];  // Use actual geom type instead of hardcoding to SDF
+
+  // Only get SDF plugin if g2 is an SDF
+  if (geomtype == mjGEOM_SDF) {
+    sdf_ptr = instance == -1 ? NULL : mjc_getSDF(m, g2);
+  }
+
+  // For cylinder or other non-plugin geoms, use the geom index directly
+  instance = instance == -1 ? g2 : instance;
 
   // copy into data
   mjSDF sdf;
@@ -831,9 +844,9 @@ int mjc_MeshSDF(const mjModel* m, const mjData* d, mjContact* con, int g1, int g
     if (depth < margin) {
       if (ncandidate < MAXMESHPNT) {
         // Still have room, add normally
-      mju_copy3(candidate + 3*ncandidate, x);
-      index[ncandidate] = ncandidate;
-      dist[ncandidate++] = depth;
+        mju_copy3(candidate + 3*ncandidate, x);
+        index[ncandidate] = ncandidate;
+        dist[ncandidate++] = depth;
       } else {
         // Find the least penetrating contact
         int worst_idx = 0;

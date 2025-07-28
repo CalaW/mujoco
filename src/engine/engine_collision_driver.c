@@ -45,7 +45,7 @@ mjfCollision mjCOLLISIONFUNC[mjNGEOMTYPES][mjNGEOMTYPES] = {
   /*SPHERE    */ {0,     0,      mjc_SphereSphere, mjc_SphereCapsule,  mjc_Convex,       mjc_SphereCylinder, mjc_SphereBox,    mjc_Convex,       mjc_SDF},
   /*CAPSULE   */ {0,     0,      0,                mjc_CapsuleCapsule, mjc_Convex,       mjc_Convex,         mjc_CapsuleBox,   mjc_Convex,       mjc_SDF},
   /*ELLIPSOID */ {0,     0,      0,                0,                  mjc_Convex,       mjc_Convex,         mjc_Convex,       mjc_Convex,       mjc_SDF},
-  /*CYLINDER  */ {0,     0,      0,                0,                  0,                mjc_Convex,         mjc_Convex,       mjc_Convex,       mjc_SDF},
+  /*CYLINDER  */ {0,     0,      0,                0,                  0,                mjc_Convex,         mjc_Convex,       mjc_MeshSDF,       mjc_SDF},
   /*BOX       */ {0,     0,      0,                0,                  0,                0,                  mjc_BoxBox,       mjc_Convex,       mjc_SDF},
   /*MESH      */ {0,     0,      0,                0,                  0,                0,                  0,                mjc_Convex,       mjc_MeshSDF},
   /*SDF       */ {0,     0,      0,                0,                  0,                0,                  0,                0,                mjc_SDF}
