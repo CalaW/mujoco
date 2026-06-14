@@ -545,9 +545,9 @@ static int isknown(const mjtNum* points, const mjtNum x[3], int cnt) {
 static int addPreContact(mjtNum* points, mjPreContact* con, const mjtNum x[3],
                          const mjtNum pos2[3], const mjtNum quat2[4], mjtNum dist,
                          int cnt, const mjModel* m, const mjSDF* s, const mjData* d,
-                         int flipNormal) {
+                         int flipNormal, mjtNum margin) {
   // check if there is a collision
-  if (dist > 0 || isknown(points, x, cnt)) {
+  if (dist > margin || isknown(points, x, cnt)) {
     return cnt;
   } else {
     mju_copy3(points+3*cnt, x);
@@ -587,10 +587,10 @@ static int addPreContact(mjtNum* points, mjPreContact* con, const mjtNum x[3],
 static int addContact(mjtNum* points, mjContact* con, const mjtNum x[3],
                       const mjtNum pos2[3], const mjtNum quat2[4], mjtNum dist,
                       int cnt, const mjModel* m, const mjSDF* s, const mjData* d,
-                      int flipNormal) {
+                      int flipNormal, mjtNum margin) {
   mjPreContact precon;
   int ncon = addPreContact(points, &precon, x, pos2, quat2, dist, cnt, m, s, d,
-                           flipNormal);
+                           flipNormal, margin);
   if (ncon > cnt) {
     con[cnt].dist = precon.dist;
     mju_copy3(con[cnt].pos, precon.pos);
@@ -682,7 +682,7 @@ static mjtNum stepGradient(mjtNum x[3], const mjModel* m, const mjSDF* s,
 
 // stricter triangle collision
 static int triangleIntersect(const mjtNum triangle[9], const mjModel* m,
-                             const mjSDF* sdf, const mjData* d) {
+                             const mjSDF* sdf, const mjData* d, mjtNum margin) {
   mjtNum edges[6];
   mjtNum normal[3], center[3];
   mjtNum v[9], cross[9], p[3];
@@ -719,7 +719,7 @@ static int triangleIntersect(const mjtNum triangle[9], const mjModel* m,
     mjtNum circumradius = (a * b * c) / (4.0 * mju_max(area, mjMINVAL));
 
     // check if centroid is within circumradius of the SDF
-    return dist_at_centroid < circumradius;
+    return dist_at_centroid < circumradius + margin;
   }
 
   // fourth point: triangle centroid pushed along normal
@@ -739,7 +739,7 @@ static int triangleIntersect(const mjtNum triangle[9], const mjModel* m,
   mjtNum denom = 2.*mju_dot3(v, cross);
   if (mju_abs(denom) < mjMINVAL) {
     // degenerate: fall back to simple distance check
-    return dist_at_centroid < mju_norm3(edges);
+    return dist_at_centroid < mju_norm3(edges) + margin;
   }
   mju_scl3(center, center, 1./denom);
 
@@ -749,13 +749,13 @@ static int triangleIntersect(const mjtNum triangle[9], const mjModel* m,
   // coordinate change
   mju_addTo3(center, p);
 
-  return mjc_distance(m, d, sdf, center) < r;
+  return mjc_distance(m, d, sdf, center) < r + margin;
 }
 
 // intersect with circumsphere of bounding box
 static int boxIntersect(const mjtNum bvh[6], const mjtNum offset[3],
                         const mjtNum rotation[9], const mjModel* m,
-                        const mjSDF* s, const mjData* d) {
+                        const mjSDF* s, const mjData* d, mjtNum margin) {
   mjtNum candidate[3];
   mjtNum r = mju_norm3(bvh+3);
 
@@ -763,7 +763,7 @@ static int boxIntersect(const mjtNum bvh[6], const mjtNum offset[3],
   mju_addTo3(candidate, offset);
 
   // check if inside the bounding box
-  return mjc_distance(m, d, s, candidate) < r;
+  return mjc_distance(m, d, s, candidate) < r + margin;
 }
 
 // Farthest point sampling (FPS) to select spatially diverse contacts
@@ -826,11 +826,12 @@ static int selectFPS(const mjtNum* candidate, const mjtNum* dist, int ncandidate
 // Adds penetrating candidates to candidate/dist arrays.
 static void processSdfCorners(const mjtNum corners[9], const mjModel* m, const mjData* d,
                               const mjSDF* sdf, int nstartpts,
-                              mjtNum* candidate, mjtNum* dist, int* ncandidate) {
+                              mjtNum* candidate, mjtNum* dist, int* ncandidate,
+                              mjtNum margin) {
   mjtNum x[3], depth;
 
   // stricter culling using triangle circumsphere
-  if (!triangleIntersect(corners, m, sdf, d)) {
+  if (!triangleIntersect(corners, m, sdf, d, margin)) {
     return;
   }
 
@@ -857,7 +858,7 @@ static void processSdfCorners(const mjtNum corners[9], const mjModel* m, const m
     depth = stepFrankWolfe(x, corners, 3, m, sdf, d);
 
     // store candidate if penetration
-    if (depth < 0) {
+    if (depth < margin) {
       int nc = *ncandidate;
       mju_copy3(candidate + 3*nc, x);
       dist[nc] = depth;
@@ -876,6 +877,7 @@ typedef struct {
   int vertadr;
   int faceadr;
   int nstartpts;
+  mjtNum margin;
   mjtNum* candidate;
   mjtNum* dist;
   int* ncandidate;
@@ -901,7 +903,7 @@ static void processOneFace(int faceid, mjtBool* bvh_active, int node,
 
   // use shared helper for Halton sampling + Frank-Wolfe
   processSdfCorners(corners, m, ctx->d, ctx->sdf, ctx->nstartpts,
-                    ctx->candidate, ctx->dist, ctx->ncandidate);
+                    ctx->candidate, ctx->dist, ctx->ncandidate, ctx->margin);
 
   if (bvh_active && *(ctx->ncandidate) > 0) bvh_active[node] = true;
 }
@@ -922,7 +924,7 @@ typedef int (*BVHLeafCallback)(int leaf_id, int node, void* ctx);
 static void traverseBVH(const mjtNum* bvh, const int* nodeid, const int* child,
                         mjtBool* bvh_active, const mjtNum* offset, const mjtNum* rotation,
                         const mjModel* m, const mjData* d, const mjSDF* sdf,
-                        BVHLeafCallback callback, void* ctx) {
+                        BVHLeafCallback callback, void* ctx, mjtNum margin) {
   int stack[64];
   int nstack = 0;
   stack[nstack++] = 0;
@@ -932,7 +934,7 @@ static void traverseBVH(const mjtNum* bvh, const int* nodeid, const int* child,
 
     // leaf node: call callback
     if (nodeid[node] != -1) {
-      if (boxIntersect(bvh + 6*node, offset, rotation, m, sdf, d)) {
+      if (boxIntersect(bvh + 6*node, offset, rotation, m, sdf, d, margin)) {
         int active = callback(nodeid[node], node, ctx);
         if (bvh_active && active) bvh_active[node] = true;
       }
@@ -940,7 +942,7 @@ static void traverseBVH(const mjtNum* bvh, const int* nodeid, const int* child,
     }
 
     // intermediate node: check bounding box
-    if (!boxIntersect(bvh + 6*node, offset, rotation, m, sdf, d)) {
+    if (!boxIntersect(bvh + 6*node, offset, rotation, m, sdf, d, margin)) {
       continue;
     }
 
@@ -978,6 +980,16 @@ int mjc_HFieldSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2
 
 // collision between a mesh and a signed distance field
 int mjc_MeshSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtNum margin) {
+  // ensure mesh is always the first geom for the geometric query, but preserve
+  // the original contact normal convention.
+  int flipNormal = 0;
+  if (m->geom_type[g1] == mjGEOM_CYLINDER) {
+    int temp = g1;
+    g1 = g2;
+    g2 = temp;
+    flipNormal = 1;
+  }
+
   const mjtNum* pos1 = d->geom_xpos + 3*g1;
   const mjtNum* mat1 = d->geom_xmat + 9*g1;
   const mjtNum* pos2 = d->geom_xpos + 3*g2;
@@ -989,9 +1001,12 @@ int mjc_MeshSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, 
 
   // get sdf plugin
   int instance = m->geom_plugin[g2];
-  const mjpPlugin* sdf_ptr = instance == -1 ? NULL : mjc_getSDF(m, g2);
-  instance = instance == -1 ? m->geom_dataid[g2] : instance;
-  mjtGeom geomtype = mjGEOM_SDF;
+  const mjpPlugin* sdf_ptr = NULL;
+  mjtGeom geomtype = m->geom_type[g2];
+  if (geomtype == mjGEOM_SDF && instance != -1) {
+    sdf_ptr = mjc_getSDF(m, g2);
+  }
+  instance = instance == -1 ? (geomtype == mjGEOM_SDF ? m->geom_dataid[g2] : g2) : instance;
 
   // copy into data
   mjSDF sdf;
@@ -1016,6 +1031,7 @@ int mjc_MeshSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, 
   ctx.vertadr = m->mesh_vertadr[m->geom_dataid[g1]];
   ctx.faceadr = m->mesh_faceadr[m->geom_dataid[g1]];
   ctx.nstartpts = mju_max(1, m->opt.sdf_initpoints);
+  ctx.margin = margin;
   ctx.candidate = candidate;
   ctx.dist = dist2;
   ctx.ncandidate = &ncandidate;
@@ -1029,14 +1045,14 @@ int mjc_MeshSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, 
     mjtBool* bvh_active = m->vis.global.bvactive ? d->bvh_active + bvhadr : NULL;
 
     traverseBVH(bvh, nodeid, child, bvh_active, ctx.offset, ctx.rotation,
-                m, d, ctx.sdf, meshFaceCallback, &ctx);
+                m, d, ctx.sdf, meshFaceCallback, &ctx, margin);
   }
 
   // if few candidates, add them all directly
   if (ncandidate <= mjMAXCONPAIR) {
     for (int i = 0; i < ncandidate; i++) {
       cnt = addPreContact(points, con + cnt, candidate + 3*i, pos2, sdf_quat,
-                          dist2[i], cnt, m, &sdf, d, 0);
+                          dist2[i], cnt, m, &sdf, d, flipNormal, margin);
     }
     return cnt;
   }
@@ -1049,7 +1065,7 @@ int mjc_MeshSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, 
   for (int i = 0; i < nselected; i++) {
     int idx = selected_indices[i];
     cnt = addPreContact(points, con + cnt, candidate + 3*idx, pos2, sdf_quat,
-                        dist2[idx], cnt, m, &sdf, d, 0);
+                        dist2[idx], cnt, m, &sdf, d, flipNormal, margin);
   }
 
   return cnt;
@@ -1113,7 +1129,8 @@ int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtN
   }
 
   // no intersection if max < min
-  if (aabb[3] < aabb[0] || aabb[4] < aabb[1] || aabb[5] < aabb[2]) {
+  if (aabb[3] + margin < aabb[0] || aabb[4] + margin < aabb[1] ||
+      aabb[5] + margin < aabb[2]) {
     return cnt;
   }
 
@@ -1185,7 +1202,8 @@ int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtN
 
     // contact point and normal - we use the midsurface where SDF1=SDF2 as zero level set
     sdf.type = mjSDFTYPE_MIDSURFACE;
-    cnt = addPreContact(contacts, con + cnt, x, pos2, quat2, dist2, cnt, m, &sdf, d, 0);
+    cnt = addPreContact(contacts, con + cnt, x, pos2, quat2, dist2, cnt, m, &sdf, d, 0,
+                        margin);
 
     // SHOULD NOT OCCUR
     if (cnt > mjMAXCONPAIR) {
@@ -1207,6 +1225,7 @@ typedef struct {
   int f;
   int dim;
   int nstartpts;
+  mjtNum margin;
   mjtNum* candidate;
   mjtNum* dist;
   int* elem_id;
@@ -1240,7 +1259,7 @@ static int flexElemCallback(int elem_idx, int node, void* ctx) {
   mjtNum elem_dist[mjMAXCONPAIR];
   int elem_ncandidate = 0;
   processSdfCorners(corners, m, fctx->d, fctx->sdf, fctx->nstartpts,
-                    elem_candidate, elem_dist, &elem_ncandidate);
+                    elem_candidate, elem_dist, &elem_ncandidate, fctx->margin);
 
   // keep only deepest penetrating candidate from this element
   if (elem_ncandidate > 0) {
@@ -1329,7 +1348,8 @@ int mjc_FlexSDF(const mjModel* m, const mjData* d, mjContact* con,
 
       // process triangle using shared helper (per-element candidates)
       int elem_ncandidate = 0;
-      processSdfCorners(corners, m, d, &sdf, nstartpts, elem_candidate, elem_dist, &elem_ncandidate);
+      processSdfCorners(corners, m, d, &sdf, nstartpts, elem_candidate, elem_dist,
+                        &elem_ncandidate, margin);
 
       // add contacts for this element immediately (per-element points tracking)
       mjtNum elem_points[3*mjMAXCONPAIR];
@@ -1337,7 +1357,7 @@ int mjc_FlexSDF(const mjModel* m, const mjData* d, mjContact* con,
       for (int i = 0; i < elem_ncandidate && cnt < mjMAXCONPAIR; i++) {
         int old_elem_cnt = elem_cnt;
         elem_cnt = addContact(elem_points, con + cnt, elem_candidate + 3*i, sdf_pos, sdf_quat,
-                              elem_dist[i], elem_cnt, m, &sdf, d, 1);
+                              elem_dist[i], elem_cnt, m, &sdf, d, 1, margin);
         // set element ID for successfully added contact
         if (elem_cnt > old_elem_cnt) {
           con[cnt].elem[1] = e;
@@ -1367,13 +1387,14 @@ int mjc_FlexSDF(const mjModel* m, const mjData* d, mjContact* con,
   fctx.f = f;
   fctx.dim = dim;
   fctx.nstartpts = nstartpts;
+  fctx.margin = margin;
   fctx.candidate = candidate;
   fctx.dist = dist;
   fctx.elem_id = elem_id;
   fctx.ncandidate = &ncandidate;
 
   traverseBVH(bvh, elemid, child, bvh_active, offset, rotation,
-              m, d, &sdf, flexElemCallback, &fctx);
+              m, d, &sdf, flexElemCallback, &fctx, margin);
 
 
   // if few candidates, add them all directly
@@ -1381,7 +1402,7 @@ int mjc_FlexSDF(const mjModel* m, const mjData* d, mjContact* con,
     for (int i = 0; i < ncandidate; i++) {
       int old_cnt = cnt;
       cnt = addContact(points, con, candidate + 3*i, sdf_pos, sdf_quat,
-                       dist[i], cnt, m, &sdf, d, 1);
+                       dist[i], cnt, m, &sdf, d, 1, margin);
       // set element ID for successfully added contact
       if (cnt > old_cnt) {
         con[old_cnt].elem[1] = elem_id[i];
@@ -1399,7 +1420,7 @@ int mjc_FlexSDF(const mjModel* m, const mjData* d, mjContact* con,
     int idx = selected_indices[i];
     int old_cnt = cnt;
     cnt = addContact(points, con, candidate + 3*idx, sdf_pos, sdf_quat,
-                     dist[idx], cnt, m, &sdf, d, 1);
+                     dist[idx], cnt, m, &sdf, d, 1, margin);
     // set element ID for successfully added contact
     if (cnt > old_cnt) {
       con[old_cnt].elem[1] = elem_id[idx];
